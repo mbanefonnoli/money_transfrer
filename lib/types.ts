@@ -13,6 +13,7 @@ export interface ProviderResult {
   status: 'ok' | 'unavailable';
   rate: number | null;
   amountReceived: number | null;
+  reason?: string;
 }
 
 export interface RatesRequest {

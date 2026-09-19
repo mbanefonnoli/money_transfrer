@@ -101,11 +101,21 @@ export async function POST(req: NextRequest) {
         amountReceived: result.value.amountReceived,
       };
     }
-    // Log the real reason server-side. These providers are scraped and will
-    // legitimately break when a page changes — a silent "unavailable" with
-    // no trace makes that much harder to diagnose later.
+    // Log the real reason server-side, and also surface it in the response.
+    // This is a single-user personal tool with no untrusted audience, so a
+    // raw error string here is a debugging aid, not an information leak —
+    // it's what makes "why is TransferGo unavailable on Vercel but not
+    // locally" answerable without digging through platform logs.
+    const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
     console.error(`[rates] ${p.id} unavailable:`, result.reason);
-    return { provider: p.id, label: p.label, status: 'unavailable', rate: null, amountReceived: null };
+    return {
+      provider: p.id,
+      label: p.label,
+      status: 'unavailable',
+      rate: null,
+      amountReceived: null,
+      reason,
+    };
   });
 
   return NextResponse.json(payload);
