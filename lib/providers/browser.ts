@@ -9,6 +9,23 @@ import type { Browser, Page } from 'puppeteer-core';
 // type, so callers don't need to know which one they got.
 export async function getBrowser(): Promise<Browser> {
   if (process.env.VERCEL) {
+    // @sparticuz/chromium only extracts and links its bundled shared
+    // libraries (the ones containing libnss3.so, which Chromium needs to
+    // even start) when its own isRunningInAwsLambda()/...Node20() checks
+    // pass — and those check for AWS_EXECUTION_ENV / AWS_LAMBDA_JS_RUNTIME,
+    // which Vercel's Node.js Functions never set themselves even though
+    // they run on Lambda-like infrastructure. Without this, the package
+    // silently skips extracting al2023.tar.br and never sets
+    // LD_LIBRARY_PATH — which is exactly "libnss3.so: cannot open shared
+    // object file" in production while working fine locally. Confirmed by
+    // reading node_modules/@sparticuz/chromium/build/{index,helper}.js.
+    // This MUST run before `@sparticuz/chromium` is imported below: the
+    // LD_LIBRARY_PATH setup happens as top-level module code, once, at
+    // import time.
+    if (!process.env.AWS_EXECUTION_ENV) {
+      process.env.AWS_EXECUTION_ENV = 'AWS_Lambda_nodejs20.x';
+    }
+
     const chromium = (await import('@sparticuz/chromium')).default;
     const puppeteer = await import('puppeteer-core');
     return puppeteer.launch({
