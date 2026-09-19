@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { CurrencyCode, ProviderId, ProviderResult, RatesRequest } from '@/lib/types';
+import { CurrencyCode, ProviderId, ProviderResult, RatesRequest, RatesResponse } from '@/lib/types';
 import { wise } from '@/lib/providers/wise';
 import { transferGo } from '@/lib/providers/transfergo';
 import { taptapSend } from '@/lib/providers/taptapsend';
@@ -60,29 +60,7 @@ function withTimeout<T>(
   });
 }
 
-export async function POST(req: NextRequest) {
-  let body: RatesRequest;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
-  }
-
-  const { amount, from, to } = body;
-  const isValidCurrency = (c: unknown): c is CurrencyCode =>
-    typeof c === 'string' && CURRENCIES.includes(c as CurrencyCode);
-
-  if (
-    typeof amount !== 'number' ||
-    !Number.isFinite(amount) ||
-    amount <= 0 ||
-    !isValidCurrency(from) ||
-    !isValidCurrency(to) ||
-    from === to
-  ) {
-    return NextResponse.json({ error: 'Invalid amount/from/to' }, { status: 400 });
-  }
-
+async function fetchLeg(amount: number, from: CurrencyCode, to: CurrencyCode): Promise<ProviderResult[]> {
   const settled = await Promise.allSettled(
     PROVIDERS.map(({ fn, timeoutMs }) => {
       const controller = new AbortController();
@@ -90,13 +68,13 @@ export async function POST(req: NextRequest) {
     })
   );
 
-  const payload: ProviderResult[] = PROVIDERS.map((p, i) => {
+  return PROVIDERS.map((p, i) => {
     const result = settled[i];
     if (result.status === 'fulfilled') {
       return {
         provider: p.id,
         label: p.label,
-        status: 'ok',
+        status: 'ok' as const,
         rate: result.value.rate,
         amountReceived: result.value.amountReceived,
       };
@@ -107,16 +85,50 @@ export async function POST(req: NextRequest) {
     // it's what makes "why is TransferGo unavailable on Vercel but not
     // locally" answerable without digging through platform logs.
     const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-    console.error(`[rates] ${p.id} unavailable:`, result.reason);
+    console.error(`[rates] ${p.id} unavailable for ${from}->${to}:`, result.reason);
     return {
       provider: p.id,
       label: p.label,
-      status: 'unavailable',
+      status: 'unavailable' as const,
       rate: null,
       amountReceived: null,
       reason,
     };
   });
+}
 
+export async function POST(req: NextRequest) {
+  let body: RatesRequest;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  const { amount, foreignCurrency } = body;
+  const isValidCurrency = (c: unknown): c is CurrencyCode =>
+    typeof c === 'string' && CURRENCIES.includes(c as CurrencyCode);
+
+  if (
+    typeof amount !== 'number' ||
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    !isValidCurrency(foreignCurrency) ||
+    foreignCurrency === 'NGN'
+  ) {
+    return NextResponse.json({ error: 'Invalid amount/foreignCurrency' }, { status: 400 });
+  }
+
+  // BUY: you buy foreignCurrency from a customer, handing them NGN.
+  // SELL: you sell foreignCurrency to a customer, they hand you NGN.
+  // Both legs' provider calls are independent, so run all 6 in parallel
+  // rather than doing one leg after the other — no latency cost for
+  // showing both sides instead of one.
+  const [buy, sell] = await Promise.all([
+    fetchLeg(amount, foreignCurrency, 'NGN'),
+    fetchLeg(amount, 'NGN', foreignCurrency),
+  ]);
+
+  const payload: RatesResponse = { buy, sell };
   return NextResponse.json(payload);
 }

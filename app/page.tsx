@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CurrencyCode, HistoryRecord, ProviderId, ProviderResult } from '@/lib/types';
+import { CurrencyCode, HistoryRecord, Leg, ProviderId, ProviderResult, RatesResponse } from '@/lib/types';
 import { RateRow } from '@/components/RateRow';
 import { QuotePanel } from '@/components/QuotePanel';
 import { HistoryTable } from '@/components/HistoryTable';
@@ -13,16 +13,33 @@ const PROVIDER_ORDER: { id: ProviderId; label: string }[] = [
   { id: 'taptapsend', label: 'Taptap Send' },
 ];
 
+interface Selection {
+  leg: Leg;
+  providerId: ProviderId;
+}
+
+function bestProviderId(results: ProviderResult[] | undefined): ProviderId | null {
+  if (!results) return null;
+  let best: ProviderResult | null = null;
+  for (const r of results) {
+    if (r.status === 'ok' && r.amountReceived !== null) {
+      if (!best || r.amountReceived > (best.amountReceived ?? -Infinity)) {
+        best = r;
+      }
+    }
+  }
+  return best?.provider ?? null;
+}
+
 export default function Home() {
   const [amount, setAmount] = useState('100');
   const [foreignCurrency, setForeignCurrency] = useState<'RON' | 'EUR'>('EUR');
-  const [direction, setDirection] = useState<'fromNGN' | 'toNGN'>('fromNGN');
 
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<ProviderResult[] | null>(null);
+  const [results, setResults] = useState<RatesResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [selectedProvider, setSelectedProvider] = useState<ProviderId | null>(null);
+  const [selection, setSelection] = useState<Selection | null>(null);
   const [markupPct, setMarkupPct] = useState('');
 
   const [history, setHistory] = useState<HistoryRecord[]>([]);
@@ -31,43 +48,44 @@ export default function Home() {
     setHistory(loadHistory());
   }, []);
 
-  const from: CurrencyCode = direction === 'fromNGN' ? 'NGN' : foreignCurrency;
-  const to: CurrencyCode = direction === 'fromNGN' ? foreignCurrency : 'NGN';
-
   const amountNumber = parseFloat(amount);
   const amountValid = !Number.isNaN(amountNumber) && amountNumber > 0;
 
-  const bestProviderId = (() => {
-    if (!results) return null;
-    let best: ProviderResult | null = null;
-    for (const r of results) {
-      if (r.status === 'ok' && r.amountReceived !== null) {
-        if (!best || r.amountReceived > (best.amountReceived ?? -Infinity)) {
-          best = r;
-        }
-      }
-    }
-    return best?.provider ?? null;
-  })();
+  const bestBuyId = bestProviderId(results?.buy);
+  const bestSellId = bestProviderId(results?.sell);
 
-  const selectedResult = results?.find((r) => r.provider === selectedProvider) ?? null;
+  const selectedResult = selection
+    ? (results?.[selection.leg].find((r) => r.provider === selection.providerId) ?? null)
+    : null;
+
+  // BUY: foreignCurrency -> NGN. SELL: NGN -> foreignCurrency.
+  const selectedFrom: CurrencyCode | null = selection
+    ? selection.leg === 'buy'
+      ? foreignCurrency
+      : 'NGN'
+    : null;
+  const selectedTo: CurrencyCode | null = selection
+    ? selection.leg === 'buy'
+      ? 'NGN'
+      : foreignCurrency
+    : null;
 
   async function handleCompare() {
     if (!amountValid) return;
     setLoading(true);
     setErrorMsg(null);
     setResults(null);
-    setSelectedProvider(null);
+    setSelection(null);
     setMarkupPct('');
 
     try {
       const res = await fetch('/api/rates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: amountNumber, from, to }),
+        body: JSON.stringify({ amount: amountNumber, foreignCurrency }),
       });
       if (!res.ok) throw new Error('Request failed');
-      const data: ProviderResult[] = await res.json();
+      const data: RatesResponse = await res.json();
       setResults(data);
     } catch {
       setErrorMsg('Could not reach the rates service. Try again.');
@@ -76,12 +94,14 @@ export default function Home() {
     }
   }
 
-  function handleSelectProvider(providerId: ProviderId) {
-    setSelectedProvider(providerId);
-  }
-
   function handleLogQuote() {
-    if (!selectedResult || selectedResult.status !== 'ok' || selectedResult.amountReceived === null) {
+    if (
+      !selectedResult ||
+      selectedResult.status !== 'ok' ||
+      selectedResult.amountReceived === null ||
+      !selectedFrom ||
+      !selectedTo
+    ) {
       return;
     }
     const markupValue = parseFloat(markupPct);
@@ -93,8 +113,8 @@ export default function Home() {
     const record: HistoryRecord = {
       id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
       date: new Date().toLocaleString(),
-      from,
-      to,
+      from: selectedFrom,
+      to: selectedTo,
       amount: amountNumber,
       provider: selectedResult.label,
       marketRate: selectedResult.rate ?? 0,
@@ -131,17 +151,7 @@ export default function Home() {
           />
 
           <div className="mt-4 flex items-center justify-between">
-            <div className="tabular text-lg font-semibold">
-              {from} → {to}
-            </div>
-            <button
-              type="button"
-              aria-label="Swap direction"
-              onClick={() => setDirection((d) => (d === 'fromNGN' ? 'toNGN' : 'fromNGN'))}
-              className="border border-hairline px-3 py-1.5 text-sm hover:bg-ink/[0.03]"
-            >
-              Swap
-            </button>
+            <div className="tabular text-lg font-semibold">NGN / {foreignCurrency}</div>
           </div>
 
           <div className="mt-2 flex gap-2">
@@ -179,27 +189,34 @@ export default function Home() {
               <RateRow
                 key={provider.id}
                 provider={provider}
-                result={results?.find((r) => r.provider === provider.id) ?? null}
+                foreignCurrency={foreignCurrency}
+                buyResult={results?.buy.find((r) => r.provider === provider.id) ?? null}
+                sellResult={results?.sell.find((r) => r.provider === provider.id) ?? null}
                 loading={loading}
-                isBest={provider.id === bestProviderId}
-                isSelected={provider.id === selectedProvider}
-                toCurrency={to}
-                onSelect={() => handleSelectProvider(provider.id)}
+                isBestBuy={provider.id === bestBuyId}
+                isBestSell={provider.id === bestSellId}
+                isSelectedBuy={selection?.leg === 'buy' && selection.providerId === provider.id}
+                isSelectedSell={selection?.leg === 'sell' && selection.providerId === provider.id}
+                onSelectBuy={() => setSelection({ leg: 'buy', providerId: provider.id })}
+                onSelectSell={() => setSelection({ leg: 'sell', providerId: provider.id })}
               />
             ))}
           </section>
         )}
 
-        {selectedResult && selectedResult.status === 'ok' && selectedResult.amountReceived !== null && (
-          <QuotePanel
-            providerLabel={selectedResult.label}
-            baseAmount={selectedResult.amountReceived}
-            toCurrency={to}
-            markupPct={markupPct}
-            onMarkupChange={setMarkupPct}
-            onLogQuote={handleLogQuote}
-          />
-        )}
+        {selectedResult &&
+          selectedResult.status === 'ok' &&
+          selectedResult.amountReceived !== null &&
+          selectedTo && (
+            <QuotePanel
+              providerLabel={`${selectedResult.label} (${selection?.leg === 'buy' ? 'buy' : 'sell'} ${foreignCurrency})`}
+              baseAmount={selectedResult.amountReceived}
+              toCurrency={selectedTo}
+              markupPct={markupPct}
+              onMarkupChange={setMarkupPct}
+              onLogQuote={handleLogQuote}
+            />
+          )}
 
         <HistoryTable history={history} onExportCsv={() => downloadHistoryCsv(history)} />
       </div>
