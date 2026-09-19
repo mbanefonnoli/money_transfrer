@@ -1,5 +1,16 @@
 import type { Browser, Page } from 'puppeteer-core';
 
+// Buy and sell legs now fetch TransferGo/Taptap Send concurrently within the
+// same request (see app/api/rates/route.ts), so multiple getBrowser() calls
+// can land in the same warm function instance at once. @sparticuz/chromium's
+// executablePath() extracts its brotli-compressed binary to /tmp/chromium on
+// first use — two concurrent extractions of the same not-yet-fully-written
+// file race and blow up with "spawn ETXTBSY" (seen in production after
+// shipping buy/sell side by side). Memoizing the extraction promise means
+// every concurrent caller in this instance awaits the same extraction
+// instead of racing to produce it.
+let executablePathPromise: Promise<string> | null = null;
+
 // Vercel's serverless Linux runtime can't run the full `puppeteer` package's
 // bundled Chromium download, so production uses `puppeteer-core` pointed at
 // `@sparticuz/chromium`'s Lambda-compatible binary. That binary is Linux-only
@@ -28,9 +39,18 @@ export async function getBrowser(): Promise<Browser> {
 
     const chromium = (await import('@sparticuz/chromium')).default;
     const puppeteer = await import('puppeteer-core');
+    if (!executablePathPromise) {
+      executablePathPromise = chromium.executablePath();
+      // Don't let a failed extraction permanently poison every later call in
+      // this warm instance — clear the memo so the next getBrowser() retries
+      // instead of re-awaiting a promise that's already known to reject.
+      executablePathPromise.catch(() => {
+        executablePathPromise = null;
+      });
+    }
     return puppeteer.launch({
       args: chromium.args,
-      executablePath: await chromium.executablePath(),
+      executablePath: await executablePathPromise,
       headless: true,
     }) as unknown as Promise<Browser>;
   }
